@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Satellite Daily Check</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#181b22; --line:#262b36; --tx:#e6e8ec; --dim:#8b93a1;
+    --buy:#16a34a; --sell:#dc2626; --hold:#f59e0b; --none:#64748b;
+    --px:#3b82f6; --ma:#f59e0b; --band:#f59e0b33;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--tx);
+       font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;
+       padding:12px 12px 40px;max-width:640px;margin:0 auto}
+  h1{font-size:17px;margin:4px 2px 2px;font-weight:700;letter-spacing:.02em}
+  .sub{color:var(--dim);font-size:11px;margin:0 2px 12px}
+  .bar{display:flex;gap:8px;margin-bottom:12px}
+  button{flex:1;background:var(--card);color:var(--tx);border:1px solid var(--line);
+         border-radius:10px;padding:11px;font-size:14px;font-weight:600}
+  button:active{background:#20242d}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:12px;margin-bottom:11px}
+  .row{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:2px}
+  .tk{font-size:18px;font-weight:700}
+  .und{color:var(--dim);font-size:11px;margin-left:6px;font-weight:400}
+  .sig{font-size:13px;font-weight:800;padding:3px 10px;border-radius:8px;letter-spacing:.03em}
+  .s-buy{background:var(--buy);color:#fff}
+  .s-sell{background:var(--sell);color:#fff}
+  .s-above{background:#16a34a22;color:var(--buy);border:1px solid var(--buy)}
+  .s-below{background:#dc262622;color:var(--sell);border:1px solid var(--sell)}
+  .s-band{background:#f59e0b22;color:var(--hold);border:1px solid var(--hold)}
+  .meta{display:flex;gap:14px;color:var(--dim);font-size:11px;margin:6px 0 4px;flex-wrap:wrap}
+  .meta b{color:var(--tx);font-weight:600}
+  canvas{width:100%;height:110px;display:block;margin-top:4px}
+  .legend{display:flex;gap:12px;font-size:10px;color:var(--dim);margin-top:3px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:3px;vertical-align:middle}
+  .err{color:var(--sell);font-size:11px;margin-top:4px}
+  .foot{color:var(--dim);font-size:10px;line-height:1.6;margin-top:14px;padding:0 4px}
+  details{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:11px}
+  summary{font-size:12px;color:var(--dim)}
+  textarea{width:100%;height:70px;background:#0b0d11;color:var(--tx);border:1px solid var(--line);
+           border-radius:8px;margin-top:8px;font-size:11px;font-family:monospace;padding:6px}
+  .status{font-size:11px;color:var(--dim);margin:0 2px 10px;min-height:14px}
+</style>
+</head>
+<body>
+<h1>Satellite Daily Check</h1>
+<p class="sub">200-day SMA gate ±0.5% band / underlying-based / raw distance</p>
+<div class="bar">
+  <button id="refresh">↻ 更新</button>
+</div>
+<div class="status" id="status">起動中…</div>
+<div id="cards"></div>
+
+<details>
+  <summary>データが取れないとき: 手動で終値を貼付</summary>
+  <p style="font-size:11px;color:var(--dim);margin:6px 0">
+    各原資産の日付,終値 CSV（新しい行が下）を貼り、下のボタン。1銘柄ずつでもOK。</p>
+  <div id="manual"></div>
+</details>
+
+<div class="foot">
+  判定は原資産（QQQ / ^SOX / XLF / XLE）の200日SMAと当日終値の比較。<br>
+  <b>above +band</b>=買い候補ゾーン、<b>below −band</b>=売り候補ゾーン、<b>in band</b>=中立（前回状態を維持）。<br>
+  ※これは日々のシグナル確認専用。実際の売買可否は保有状態に依存（wait方式）＝月次UIで最終確認。<br>
+  データ: GitHub Actions が平日 日本時間 6:30 に yfinance で自動更新（バックテストと同一ソース）。
+</div>
+
+<script>
+const MA=200, BAND=0.005, DAYS=504; // 2年
+// レバETF -> 原資産(判定に使用)。確定版と同じく原資産の200日線で判定。
+const SATS=[
+  {tk:'TQQQ', und:'QQQ'},
+  {tk:'SOXL', und:'^SOX'},
+  {tk:'FAS',  und:'XLF'},
+  {tk:'ERX',  und:'XLE'},
+];
+const DATA_URL='./data.json';   // 同一オリジン -> CORS/プロキシ不要
+const CACHE_KEY='satcheck_cache_v2';
+const $=id=>document.getElementById(id);
+const cardsEl=$('cards'), manualEl=$('manual'), statusEl=$('status');
+
+function parseCSV(txt){
+  // allorigins/get は {contents:"..."} でJSON包み → 剥がす
+  if(txt.trim().startsWith('{')){
+    try{ const j=JSON.parse(txt); if(j.contents) txt=j.contents; }catch(e){}
+  }
+  // Stooq: Date,Open,High,Low,Close,Volume  /  手動: date,close
+  const lines=txt.trim().split(/\r?\n/).filter(x=>x.length);
+  if(!lines.length) return null;
+  const head=lines[0].toLowerCase();
+  const hasHead=head.includes('date')||head.includes('close');
+  const rows=(hasHead?lines.slice(1):lines).map(l=>{
+    const c=l.split(',');
+    const d=c[0];
+    const close=c.length>=5?parseFloat(c[4]):parseFloat(c[1]);
+    return (d && /^\d{4}-\d{2}-\d{2}/.test(d) && isFinite(close))?{d,close}:null;
+  }).filter(Boolean);
+  return rows.length?rows:null;
+}
+function loadCache(){
+  try{ return JSON.parse(localStorage.getItem(CACHE_KEY)||'{}'); }catch(e){ return {}; }
+}
+function saveCache(tk,rows){
+  try{
+    const c=loadCache();
+    c[tk]={ts:Date.now(), rows:rows.slice(-260)}; // 直近1年強だけ保存(容量節約)
+    localStorage.setItem(CACHE_KEY,JSON.stringify(c));
+  }catch(e){}
+}
+function sma(arr,n){
+  const out=new Array(arr.length).fill(null); let s=0;
+  for(let i=0;i<arr.length;i++){ s+=arr[i]; if(i>=n)s-=arr[i-n]; if(i>=n-1)out[i]=s/n; }
+  return out;
+}
+async function loadData(){
+  try{
+    const r=await fetch(DATA_URL+'?t='+Date.now(),{cache:'no-store'});
+    if(!r.ok) throw new Error('http '+r.status);
+    const j=await r.json();
+    if(!j.series) throw new Error('bad json');
+    try{ localStorage.setItem(CACHE_KEY,JSON.stringify(j)); }catch(e){}
+    return {data:j,cached:false};
+  }catch(e){
+    try{
+      const c=localStorage.getItem(CACHE_KEY);
+      if(c) return {data:JSON.parse(c),cached:true,err:e.message};
+    }catch(e2){}
+    return {data:null,err:e.message};
+  }
+}
+function judge(px,ma){
+  const r=px/ma-1;
+  if(r>BAND)  return {r, cls:'s-above', txt:'above +band'};
+  if(r<-BAND) return {r, cls:'s-below', txt:'below −band'};
+  return {r, cls:'s-band', txt:'in band'};
+}
+function drawChart(cv,px,ma){
+  const dpr=window.devicePixelRatio||1;
+  const W=cv.clientWidth, H=cv.clientHeight;
+  cv.width=W*dpr; cv.height=H*dpr;
+  const g=cv.getContext('2d'); g.scale(dpr,dpr);
+  const vals=px.concat(ma.filter(v=>v!=null));
+  let lo=Math.min(...vals), hi=Math.max(...vals); const pad=(hi-lo)*0.06||1; lo-=pad; hi+=pad;
+  const X=i=>i/(px.length-1)*W, Y=v=>H-(v-lo)/(hi-lo)*H;
+  g.beginPath();
+  let st=false;
+  for(let i=0;i<ma.length;i++){ if(ma[i]==null){st=false;continue;} const y=Y(ma[i]*(1+BAND)); st?g.lineTo(X(i),y):g.moveTo(X(i),y); st=true;}
+  for(let i=ma.length-1;i>=0;i--){ if(ma[i]==null)continue; g.lineTo(X(i),Y(ma[i]*(1-BAND)));}
+  g.closePath(); g.fillStyle=getComputedStyle(document.body).getPropertyValue('--band'); g.fill();
+  g.beginPath(); g.lineWidth=1.4; g.strokeStyle=getComputedStyle(document.body).getPropertyValue('--ma');
+  st=false;
+  for(let i=0;i<ma.length;i++){ if(ma[i]==null){st=false;continue;} const y=Y(ma[i]); st?g.lineTo(X(i),y):g.moveTo(X(i),y); st=true;}
+  g.stroke();
+  g.beginPath(); g.lineWidth=1.4; g.strokeStyle=getComputedStyle(document.body).getPropertyValue('--px');
+  for(let i=0;i<px.length;i++){ const y=Y(px[i]); i?g.lineTo(X(i),y):g.moveTo(X(i),y);}
+  g.stroke();
+}
+function card(cfg){
+  const el=document.createElement('div'); el.className='card'; el.id='c-'+cfg.tk;
+  el.innerHTML=`<div class="row"><div><span class="tk">${cfg.tk}</span>
+    <span class="und">underlying ${cfg.und}</span></div>
+    <span class="sig" id="sig-${cfg.tk}">…</span></div>
+    <div class="meta" id="meta-${cfg.tk}"></div>
+    <canvas id="cv-${cfg.tk}"></canvas>
+    <div class="legend"><span><span class="dot" style="background:var(--px)"></span>price</span>
+    <span><span class="dot" style="background:var(--ma)"></span>200d SMA</span>
+    <span><span class="dot" style="background:var(--hold);opacity:.4"></span>±0.5% band</span></div>
+    <div class="err" id="err-${cfg.tk}"></div>`;
+  return el;
+}
+function render(cfg,ser){
+  const dates=ser.dates, closes=ser.close, maArr=ser.sma200;
+  const px=closes[closes.length-1], ma=maArr[maArr.length-1];
+  const sigEl=$('sig-'+cfg.tk), metaEl=$('meta-'+cfg.tk), errEl=$('err-'+cfg.tk);
+  errEl.textContent='';
+  if(ma==null){ errEl.textContent='データ不足(200日未満)'; return; }
+  const j=judge(px,ma);
+  sigEl.className='sig '+j.cls; sigEl.textContent=j.txt;
+  metaEl.innerHTML=`<span>date <b>${dates[dates.length-1]}</b></span>
+    <span>close <b>${px.toFixed(2)}</b></span>
+    <span>200d <b>${ma.toFixed(2)}</b></span>
+    <span>dist <b style="color:${j.r>=0?'var(--buy)':'var(--sell)'}">${(j.r*100).toFixed(2)}%</b></span>`;
+  drawChart($('cv-'+cfg.tk),closes,maArr);
+}
+function manualBox(cfg){
+  const w=document.createElement('div'); w.style.marginTop='8px';
+  w.innerHTML=`<div style="font-size:11px;font-weight:600">${cfg.und} (${cfg.tk})</div>
+    <textarea id="ta-${cfg.tk}" placeholder="2024-01-02,168.20&#10;..."></textarea>
+    <button style="margin-top:4px" onclick="applyManual('${cfg.tk}')">${cfg.tk} を計算</button>`;
+  return w;
+}
+window.applyManual=(tk)=>{
+  const cfg=SATS.find(s=>s.tk===tk);
+  const rows=parseCSV($('ta-'+tk).value);
+  if(!rows){ $('err-'+tk).textContent='CSV解析失敗'; return; }
+  const closes=rows.map(x=>x.close);
+  render(cfg,{dates:rows.map(x=>x.d),close:closes,sma200:sma(closes,MA)});
+};
+async function refresh(){
+  statusEl.textContent='読込中…';
+  const {data,cached,err}=await loadData();
+  if(!data){
+    statusEl.textContent='データ読込失敗: '+(err||'')+' (下の手動貼付をご利用ください)';
+    SATS.forEach(c=>{ $('err-'+c.tk).textContent='data.json が読めません'; });
+    return;
+  }
+  let ok=0;
+  for(const cfg of SATS){
+    const ser=data.series[cfg.tk];
+    if(ser){ render(cfg,ser); ok++; }
+    else $('err-'+cfg.tk).textContent='この銘柄のデータがありません';
+  }
+  const gen=new Date(data.generated_at);
+  const genStr=gen.toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const ageH=Math.round((Date.now()-gen.getTime())/3600000);
+  let msg=`データ生成 ${genStr} (${ageH}時間前)  ${ok}/${SATS.length}銘柄`;
+  if(cached) msg='⚠ オフライン: 端末キャッシュ表示  '+msg;
+  if(ageH>96) msg+='  ⚠ 更新が止まっている可能性';
+  statusEl.textContent=msg;
+}
+// init
+SATS.forEach(c=>{ cardsEl.appendChild(card(c)); manualEl.appendChild(manualBox(c)); });
+$('refresh').onclick=refresh;
+refresh();
+</script>
+</body>
+</html>
