@@ -1,10 +1,18 @@
 name: update satellite data
 
+# 配置場所（重要）: .github/workflows/update-data.yml
+# デフォルトブランチ(main)に置くこと。別ブランチだと手動実行ボタンが出ない。
+
 on:
   schedule:
-    # 平日 21:30 UTC = 日本時間 翌朝 6:30。米国クローズ(21:00 UTC / 夏時間20:00)後に実行。
-    - cron: '30 21 * * 1-5'
-  workflow_dispatch:        # 手動実行ボタン
+    # 米国の引け = 20:00 UTC(夏時間) / 21:00 UTC(冬時間)。
+    # 冬時間でも引けから十分間を空けるため 21:50 UTC を主、22:40 UTC を補修とする。
+    # 2回目は data.json に差分がある時だけコミットするので、1回目で足りていれば無害。
+    - cron: '50 21 * * 1-5'   # JST 06:50  主
+    - cron: '40 22 * * 1-5'   # JST 07:40  補修（遅れた銘柄の取り直し）
+  workflow_dispatch:          # 手動実行ボタン
+  push:                       # コミットしただけで走る（初回データ生成用の保険）
+    branches: [main]
 
 permissions:
   contents: write
@@ -24,5 +32,6 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
           git add docs/data.json
-          git diff --staged --quiet || git commit -m "data: $(date -u +%Y-%m-%d)"
+          git diff --staged --quiet || git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git pull --rebase --autostash || true
           git push
