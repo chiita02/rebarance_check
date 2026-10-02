@@ -209,20 +209,32 @@ async function refresh(){
     SATS.forEach(c=>{ $('err-'+c.tk).textContent='data.json が読めません'; });
     return;
   }
-  let ok=0;
+  const exp=data.expected_session||null;   // 期待する直近確定セッション
+  let ok=0, old=0;
   for(const cfg of SATS){
     const ser=data.series[cfg.tk];
-    if(ser){ render(cfg,ser); ok++; }
-    else $('err-'+cfg.tk).textContent='この銘柄のデータがありません';
+    if(!ser){ $('err-'+cfg.tk).textContent='この銘柄のデータがありません'; continue; }
+    render(cfg,ser); ok++;
+    const last=ser.dates[ser.dates.length-1];
+    if(exp && last<exp){                   // ISO日付文字列は辞書順比較でOK
+      old++;
+      $('err-'+cfg.tk).textContent=`⚠ この銘柄だけ古い: ${last}（期待 ${exp}）`;
+      $('sig-'+cfg.tk).style.opacity='0.55';
+    }else{
+      $('sig-'+cfg.tk).style.opacity='1';
+    }
   }
   const gen=new Date(data.generated_at);
   const genStr=gen.toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
   const ageH=Math.round((Date.now()-gen.getTime())/3600000);
   let msg=`データ生成 ${genStr} (${ageH}時間前)  ${ok}/${SATS.length}銘柄`;
+  if(exp) msg+=`  対象セッション ${exp}`;
+  if(old) msg=`⚠ ${old}銘柄が1日以上古い  `+msg;
   if(cached) msg='⚠ オフライン: 端末キャッシュ表示  '+msg;
   if(ageH>96) msg+='  ⚠ 更新が止まっている可能性';
   statusEl.textContent=msg;
 }
+
 // init
 SATS.forEach(c=>{ cardsEl.appendChild(card(c)); manualEl.appendChild(manualBox(c)); });
 $('refresh').onclick=refresh;
