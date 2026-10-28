@@ -6,13 +6,22 @@ name: update satellite data
 on:
   schedule:
     # 米国の引け = 20:00 UTC(夏時間) / 21:00 UTC(冬時間)。
-    # 冬時間でも引けから十分間を空けるため 21:50 UTC を主、22:40 UTC を補修とする。
-    # 2回目は data.json に差分がある時だけコミットするので、1回目で足りていれば無害。
-    - cron: '50 21 * * 1-5'   # JST 06:50  主
-    - cron: '40 22 * * 1-5'   # JST 07:40  補修（遅れた銘柄の取り直し）
+    # ETF の日次バー確定が引けの数時間後になることがあるため、1日5回に分散する。
+    # fetch_data.py v5 は「改善が無ければ書かない／古い日付では上書きしない」ので、
+    # 回数を増やしてもコミットは増えず、悪化もしない。
+    - cron: '50 21 * * 1-5'   # JST 06:50  主（引けの約2時間後）
+    - cron: '50 23 * * 1-5'   # JST 08:50
+    - cron: '50 2  * * 2-6'   # JST 11:50
+    - cron: '50 5  * * 2-6'   # JST 14:50
+    - cron: '50 8  * * 2-6'   # JST 17:50（翌日の寄り 22:30 JST の4時間半前）
   workflow_dispatch:          # 手動実行ボタン
   push:                       # コミットしただけで走る（初回データ生成用の保険）
     branches: [main]
+
+# 同時に走らないようにする（push と cron が重なると rebase で競合しうる）
+concurrency:
+  group: update-data
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -32,6 +41,7 @@ jobs:
           git config user.name  "github-actions"
           git config user.email "actions@github.com"
           git add docs/data.json
-          git diff --staged --quiet || git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git diff --staged --quiet && echo "変化なし -> コミットしない" && exit 0
+          git commit -m "data: $(date -u +%Y-%m-%dT%H:%MZ)"
           git pull --rebase --autostash || true
           git push
